@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AgentCanary — Behavioral Smoke Tests for AI Agents</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+  <style>
+    body { background: #0f1117; color: #e2e8f0; font-family: 'SF Mono', 'Fira Code', monospace; }
+    .card { background: #1a1d27; border: 1px solid #2d3148; border-radius: 12px; }
+    .badge-pass { background: #0d2b1d; color: #22c55e; border: 1px solid #166534; }
+    .badge-drift { background: #2b1f0d; color: #f59e0b; border: 1px solid #92400e; }
+    .badge-error { background: #2b0d0d; color: #ef4444; border: 1px solid #7f1d1d; }
+    .badge-neutral { background: #1e2235; color: #94a3b8; border: 1px solid #374151; }
+    .pulse-green { animation: pulse-g 2s infinite; }
+    @keyframes pulse-g {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4); }
+      50% { box-shadow: 0 0 0 6px rgba(34, 197, 94, 0); }
+    }
+    .blink { animation: blink 1.2s step-end infinite; }
+    @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: #1a1d27; }
+    ::-webkit-scrollbar-thumb { background: #374151; border-radius: 4px; }
+  </style>
+</head>
+<body class="min-h-screen p-6">
+
+  <!-- Header -->
+  <div class="max-w-6xl mx-auto">
+    <div class="flex items-center justify-between mb-8">
+      <div>
+        <div class="flex items-center gap-3 mb-1">
+          <div class="w-3 h-3 rounded-full bg-green-500 pulse-green"></div>
+          <h1 class="text-2xl font-bold text-white tracking-tight">AgentCanary</h1>
+          <span class="text-xs px-2 py-0.5 rounded-full bg-purple-900 text-purple-300 border border-purple-700">LIVE</span>
+        </div>
+        <p class="text-slate-400 text-sm">Behavioral smoke tests for deployed AI agents · probes every 15 min · alerts on drift</p>
+      </div>
+      <div class="flex items-center gap-3">
+        <div id="last-refresh" class="text-xs text-slate-500">Loading…</div>
+        <button
+          onclick="runProbeNow()"
+          id="run-btn"
+          class="px-4 py-2 text-sm bg-purple-700 hover:bg-purple-600 text-white rounded-lg transition-colors font-medium"
+        >
+          ▶ Run Probes Now
+        </button>
+      </div>
+    </div>
+
+    <!-- Stats row -->
+    <div class="grid grid-cols-4 gap-4 mb-6" id="stats-row">
+      <div class="card p-4">
+        <div class="text-xs text-slate-400 mb-1">CANARIES</div>
+        <div class="text-3xl font-bold text-white" id="stat-canaries">—</div>
+      </div>
+      <div class="card p-4">
+        <div class="text-xs text-slate-400 mb-1">LAST RUN STATUS</div>
+        <div class="text-3xl font-bold text-green-400" id="stat-status">—</div>
+      </div>
+      <div class="card p-4">
+        <div class="text-xs text-slate-400 mb-1">DRIFT EVENTS (24H)</div>
+        <div class="text-3xl font-bold text-amber-400" id="stat-drift">—</div>
+      </div>
+      <div class="card p-4">
+        <div class="text-xs text-slate-400 mb-1">AVG LATENCY (MS)</div>
+        <div class="text-3xl font-bold text-blue-400" id="stat-latency">—</div>
+      </div>
+    </div>
+
+    <!-- Main grid: canaries + alerts -->
+    <div class="grid grid-cols-3 gap-6 mb-6">
+
+      <!-- Canaries list -->
+      <div class="col-span-2 card p-5">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-sm font-semibold text-white uppercase tracking-wider">Canaries</h2>
+          <span class="text-xs text-slate-500" id="canary-count">Loading…</span>
+        </div>
+        <div id="canaries-list" class="space-y-3">
+          <div class="text-slate-500 text-sm animate-pulse">Fetching canaries…</div>
+        </div>
+      </div>
+
+      <!-- Alerts -->
+      <div class="card p-5">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-sm font-semibold text-white uppercase tracking-wider">Recent Alerts</h2>
+          <span id="alert-count" class="text-xs px-2 py-0.5 rounded-full bg-red-900 text-red-300 border border-red-700">0</span>
+        </div>
+        <div id="alerts-list" class="space-y-2">
+          <div class="text-slate-500 text-sm animate-pulse">Loading alerts…</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Probe run table -->
+    <div class="card p-5">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-sm font-semibold text-white uppercase tracking-wider">Probe Run History</h2>
+        <span class="text-xs text-slate-500" id="run-count">Loading…</span>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-xs text-slate-500 border-b border-slate-700/50">
+              <th class="text-left pb-3 pr-4">CANARY</th>
+              <th class="text-left pb-3 pr-4">QUESTION</th>
+              <th class="text-left pb-3 pr-4">STATUS</th>
+              <th class="text-left pb-3 pr-4">LATENCY</th>
+              <th class="text-left pb-3 pr-4">DRIFT REASON</th>
+              <th class="text-left pb-3">TIME</th>
+            </tr>
+          </thead>
+          <tbody id="runs-table" class="divide-y divide-slate-700/30">
+            <tr><td colspan="6" class="py-4 text-slate-500 animate-pulse">Loading probe runs…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="mt-6 text-center text-xs text-slate-600">
+      AgentCanary · Built with Supabase + Deno Edge Functions ·
+      <a href="https://github.com/RLASAF12/agent-canary" class="text-purple-500 hover:text-purple-400" target="_blank">GitHub</a>
+      · Auto-refreshes every 60s
+    </div>
+  </div>
+
+  <script>
+    const SUPABASE_URL = 'https://mfsqswettewwvzmfxsho.supabase.co'
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1mc3Fzd2V0dGV3d3Z6bWZ4c2hvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODEyMTQxODEsImV4cCI6MjA5Njc5MDE4MX0.gQe_j0rtiU5aYnQcwrrUqZSiKlVlaqJENiMx9963dDs'
+    const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+
+    function relativeTime(ts) {
+      const diff = Date.now() - new Date(ts).getTime()
+      const s = Math.floor(diff / 1000)
+      if (s < 60) return `${s}s ago`
+      const m = Math.floor(s / 60)
+      if (m < 60) return `${m}m ago`
+      const h = Math.floor(m / 60)
+      if (h < 24) return `${h}h ago`
+      return `${Math.floor(h / 24)}d ago`
+    }
+
+    function statusBadge(status) {
+      const cls = status === 'pass' ? 'badge-pass' : status === 'drift' ? 'badge-drift' : 'badge-error'
+      const icon = status === 'pass' ? '✓' : status === 'drift' ? '⚠' : '✗'
+      return `<span class="text-xs px-2 py-0.5 rounded-full font-mono ${cls}">${icon} ${status}</span>`
+    }
+
+    async function loadDashboard() {
+      // Load canaries
+      const { data: canaries } = await sb.from('canaries').select('*').order('created_at', { ascending: true })
+
+      // Load recent runs (last 50)
+      const { data: runs } = await sb
+        .from('probe_runs')
+        .select('*, canaries(name), probe_questions(question)')
+        .order('run_at', { ascending: false })
+        .limit(50)
+
+      // Load recent alerts
+      const { data: alerts } = await sb
+        .from('alerts')
+        .select('*, canaries(name)')
+        .order('created_at', { ascending: false })
+        .limit(20)
+
+      // Stats
+      const passCount = runs?.filter(r => r.status === 'pass').length || 0
+      const driftCount24h = runs?.filter(r => {
+        const age = Date.now() - new Date(r.run_at).getTime()
+        return r.status === 'drift' && age < 86400000
+      }).length || 0
+      const avgLatency = runs?.length
+        ? Math.round(runs.filter(r => r.latency_ms).reduce((s, r) => s + r.latency_ms, 0) / runs.filter(r => r.latency_ms).length)
+        : 0
+      const lastStatus = runs?.[0]?.status || 'unknown'
+
+      document.getElementById('stat-canaries').textContent = canaries?.length || 0
+      document.getElementById('stat-drift').textContent = driftCount24h
+      document.getElementById('stat-latency').textContent = avgLatency || '—'
+      const statusEl = document.getElementById('stat-status')
+      statusEl.textContent = lastStatus.toUpperCase()
+      statusEl.className = `text-3xl font-bold ${lastStatus === 'pass' ? 'text-green-400' : lastStatus === 'drift' ? 'text-amber-400' : 'text-red-400'}`
+
+      // Canaries list
+      const canaryListEl = document.getElementById('canaries-list')
+      document.getElementById('canary-count').textContent = `${canaries?.length || 0} active`
+      if (!canaries?.length) {
+        canaryListEl.innerHTML = '<div class="text-slate-500 text-sm">No canaries yet. Add one to get started.</div>'
+      } else {
+        canaryListEl.innerHTML = canaries.map(c => {
+          const canaryRuns = runs?.filter(r => r.canary_id === c.id) || []
+          const lastRun = canaryRuns[0]
+          const passRate = canaryRuns.length
+            ? Math.round(canaryRuns.filter(r => r.status === 'pass').length / canaryRuns.length * 100)
+            : null
+          return `
+            <div class="flex items-start justify-between p-3 rounded-lg bg-slate-800/40 border border-slate-700/30">
+              <div>
+                <div class="flex items-center gap-2 mb-1">
+                  <span class="text-white font-medium text-sm">${c.name}</span>
+                  ${c.is_active ? '<span class="w-1.5 h-1.5 rounded-full bg-green-500 inline-block"></span>' : '<span class="w-1.5 h-1.5 rounded-full bg-slate-500 inline-block"></span>'}
+                </div>
+                <div class="text-xs text-slate-400 font-mono truncate max-w-xs">${c.endpoint_url}</div>
+                <div class="text-xs text-slate-500 mt-1">Last: ${lastRun ? relativeTime(lastRun.run_at) : 'never'}</div>
+              </div>
+              <div class="text-right">
+                ${lastRun ? statusBadge(lastRun.status) : '<span class="text-xs text-slate-500">no runs</span>'}
+                ${passRate !== null ? `<div class="text-xs text-slate-400 mt-1">${passRate}% pass rate</div>` : ''}
+              </div>
+            </div>
+          `
+        }).join('')
+      }
+
+      // Alerts
+      const alertsEl = document.getElementById('alerts-list')
+      document.getElementById('alert-count').textContent = alerts?.length || 0
+      if (!alerts?.length) {
+        alertsEl.innerHTML = '<div class="text-slate-500 text-sm text-center py-4">🟢 No alerts — all canaries healthy</div>'
+      } else {
+        alertsEl.innerHTML = alerts.map(a => `
+          <div class="p-2.5 rounded-lg bg-red-950/30 border border-red-900/40">
+            <div class="text-xs text-red-300 leading-relaxed">${a.message}</div>
+            <div class="text-xs text-slate-500 mt-1">${relativeTime(a.created_at)}</div>
+          </div>
+        `).join('')
+      }
+
+      // Probe runs table
+      const tbody = document.getElementById('runs-table')
+      document.getElementById('run-count').textContent = `${runs?.length || 0} recent runs`
+      if (!runs?.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="py-6 text-center text-slate-500">No probe runs yet</td></tr>'
+      } else {
+        tbody.innerHTML = runs.map(r => `
+          <tr class="hover:bg-slate-800/20 transition-colors">
+            <td class="py-2.5 pr-4 text-slate-300 text-xs">${r.canaries?.name || '—'}</td>
+            <td class="py-2.5 pr-4 text-slate-400 text-xs max-w-xs truncate">${(r.probe_questions?.question || '—').slice(0, 50)}…</td>
+            <td class="py-2.5 pr-4">${statusBadge(r.status)}</td>
+            <td class="py-2.5 pr-4 text-xs ${r.latency_ms > 2000 ? 'text-amber-400' : 'text-slate-400'}">${r.latency_ms ? r.latency_ms + 'ms' : '—'}</td>
+            <td class="py-2.5 pr-4 text-xs text-amber-300/80 max-w-xs truncate">${r.drift_reason || ''}</td>
+            <td class="py-2.5 text-xs text-slate-500">${relativeTime(r.run_at)}</td>
+          </tr>
+        `).join('')
+      }
+
+      document.getElementById('last-refresh').textContent = `Refreshed ${new Date().toLocaleTimeString()}`
+    }
+
+    async function runProbeNow() {
+      const btn = document.getElementById('run-btn')
+      btn.textContent = '⏳ Running…'
+      btn.disabled = true
+      btn.className = btn.className.replace('bg-purple-700 hover:bg-purple-600', 'bg-slate-700 cursor-not-allowed')
+      try {
+        const resp = await fetch(`${SUPABASE_URL}/functions/v1/probe-runner`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          body: '{}'
+        })
+        const data = await resp.json()
+        btn.textContent = `✓ Done (${data.processed || 0} probes)`
+        setTimeout(() => {
+          btn.textContent = '▶ Run Probes Now'
+          btn.disabled = false
+          btn.className = btn.className.replace('bg-slate-700 cursor-not-allowed', 'bg-purple-700 hover:bg-purple-600')
+        }, 3000)
+        await loadDashboard()
+      } catch (e) {
+        btn.textContent = '✗ Error — check console'
+        console.error(e)
+        setTimeout(() => {
+          btn.textContent = '▶ Run Probes Now'
+          btn.disabled = false
+          btn.className = btn.className.replace('bg-slate-700 cursor-not-allowed', 'bg-purple-700 hover:bg-purple-600')
+        }, 4000)
+      }
+    }
+
+    // Initial load + auto-refresh every 60s
+    loadDashboard()
+    setInterval(loadDashboard, 60000)
+  </script>
+</body>
+</html>
